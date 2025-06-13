@@ -1,0 +1,7 @@
+venv
+data/collections/
+venv_reranker/
+venv_reranker
+./venv_reranker
+src
+data/parquet_chunks/

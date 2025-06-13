@@ -1,0 +1,61 @@
+jobName: vllmrag-adamkahirov-c8g2m100
+namespace: cast-research
+priority: "default-priority"
+
+containerImage: ghcr.io/aydamdonelly/vllm-rag-image:v1.2
+
+imagePullSecrets:
+  - name: all-icr-io
+
+numPods: 1
+numCpusPerPod: 8
+numGpusPerPod: 2
+totalMemoryPerPod: 100Gi
+
+environmentVariables:
+  - name: NCCL_MIN_NCHANNELS
+    value: "2"
+  - name: NCCL_CROSS_NIC
+    value: "0"
+  - name: CUDA_VISIBLE_DEVICES
+    value: 0,1
+  - name: NCCL_TREE_THRESHOLD
+    value: "0"
+  - name: NCCL_ALGO
+    value: Ring
+  - name: NCCL_IGNORE_CPU_AFFINITY
+    value: "1"
+  - name: NCCL_DEBUG_SUBSYS
+    value: INIT,GRAPH,ENV,TUNING
+  - name: NCCL_SOCKET_NTHREADS
+    value: "2"
+  - name: NCCL_IB_DISABLE
+    value: "1"
+  - name: NCCL_NSOCKS_PERTHREAD
+    value: "4"
+  - name: NCCL_DEBUG
+    value: WARN
+  - name: TRANSFORMERS_CACHE
+    value: /data/
+  - name: WANDB_PROJECT
+    value: sphinx
+  - name: HOME
+    value: /workspace/
+  - name: GITHUB_PAT
+    secret:
+      name: github-pat-adamkahirov
+      key: PAT
+  - name: GITHUB_USER
+    secret:
+      name: github-pat-adamkahirov
+      key: USER
+  - name: HF_HOME
+    value: /data/user_data/adam/
+
+setupCommands:
+  - sleep 28800
+volumes:
+  - name: kinesis-cache
+    claimName: kinesis-cache
+    mountPath: /data
+    subPath: user_data/adam
