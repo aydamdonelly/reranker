@@ -9,11 +9,13 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 CONFIG = {
     "SEARCH_API_URL": "http://localhost:8000/search",
+    "SEARCH_API_URL_BM25": "http://localhost:8001/search",
     "LLM_MODEL_ID": "meta-llama/Meta-Llama-3-8B-Instruct",
     "DATASET_PATH": "../data/msmarco_triplets.parquet", 
     "EVAL_LIMIT": 100,
     "TOP_K_CHUNKS": 10,
     "RESULTS_FILE": "../evaluation_results_triplet.json",
+    "RESULTS_FILE_BM25": "../evaluation_results_triplet_bm25.json",
     "SIMILARITY_THRESHOLD": 0.7,
     
     "ANSWER_PROMPT_TEMPLATE": """<|begin_of_text|><|start_header_id|>user<|end_header_id|>
@@ -48,9 +50,9 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 print("Model loaded successfully.")
 
-def query_search_service(query: str, top_k: int) -> list:
+def query_search_service(query: str, top_k: int, url_key: str = "SEARCH_API_URL") -> list:
     try:
-        response = requests.post(CONFIG["SEARCH_API_URL"], json={"text": query, "limit": top_k})
+        response = requests.post(CONFIG[url_key], json={"text": query, "limit": top_k})
         response.raise_for_status()
         return response.json().get("results", [])
     except requests.RequestException as e:
@@ -109,7 +111,7 @@ def judge_answer(question: str, answer: str) -> float:
     return 0.0
 
 def main():
-    print("Starting triplet evaluation...")
+    print("Starting triplet evaluation (semantic + BM25)...")
     
     try:
         df = pd.read_parquet(CONFIG["DATASET_PATH"])
@@ -118,74 +120,87 @@ def main():
         print(f"Error loading dataset: {e}")
         return
 
-    evaluation_results = []
-    total_judge_score = 0
-    positive_found_count = 0
-    total_positive_rank = 0
-    
-    eval_df = df.head(CONFIG["EVAL_LIMIT"])
+    def evaluate(mode_name: str, url_key: str, result_file_key: str):
+        print(f"\nEvaluating with {mode_name} retrieval ...")
 
-    for index, row in tqdm(eval_df.iterrows(), total=len(eval_df), desc="Evaluating"):
-        question = row['query']
-        positive_passage = row['positive']
-        
-        retrieved_results = query_search_service(question, CONFIG["TOP_K_CHUNKS"])
-        if not retrieved_results:
-            continue
-        
-        positive_rank = find_positive_rank(positive_passage, retrieved_results)
-        
-        generated_answer = generate_answer(question, retrieved_results)
-        if not generated_answer:
-            continue
+        evaluation_results = []
+        total_judge_score = 0
+        positive_found_count = 0
+        total_positive_rank = 0
 
-        judge_score = judge_answer(question, generated_answer)
-        
-        result_entry = {
-            "query": question,
-            "positive_passage": positive_passage,
-            "positive_rank": positive_rank,
-            "found_positive": positive_rank is not None,
-            "generated_answer": generated_answer,
-            "judge_score": judge_score,
-            "retrieved_chunks": [r['content'] for r in retrieved_results]
+        eval_df = df.head(CONFIG["EVAL_LIMIT"])
+
+        for index, row in tqdm(eval_df.iterrows(), total=len(eval_df), desc=f"{mode_name}"):
+            question = row['query']
+            positive_passage = row['positive']
+
+            retrieved_results = query_search_service(question, CONFIG["TOP_K_CHUNKS"], url_key=url_key)
+            if not retrieved_results:
+                continue
+
+            positive_rank = find_positive_rank(positive_passage, retrieved_results)
+
+            generated_answer = generate_answer(question, retrieved_results)
+            if not generated_answer:
+                continue
+
+            judge_score = judge_answer(question, generated_answer)
+
+            result_entry = {
+                "query": question,
+                "positive_passage": positive_passage,
+                "positive_rank": positive_rank,
+                "found_positive": positive_rank is not None,
+                "generated_answer": generated_answer,
+                "judge_score": judge_score,
+                "retrieved_chunks": [r['content'] for r in retrieved_results]
+            }
+            evaluation_results.append(result_entry)
+            total_judge_score += judge_score
+
+            if positive_rank is not None:
+                positive_found_count += 1
+                total_positive_rank += positive_rank
+
+        num_evaluated = len(evaluation_results)
+        if num_evaluated == 0:
+            print("No evaluations carried out – skipping metrics.")
+            return
+
+        recall = positive_found_count / num_evaluated
+        avg_judge_score = total_judge_score / num_evaluated
+        avg_positive_rank = (total_positive_rank / positive_found_count) if positive_found_count > 0 else 0
+        mrr = sum([1.0/r['positive_rank'] for r in evaluation_results if r['positive_rank'] is not None]) / num_evaluated
+
+        print(f"Evaluated: {num_evaluated}")
+        print(f"Recall@{CONFIG['TOP_K_CHUNKS']}: {recall:.4f}")
+        print(f"MRR@{CONFIG['TOP_K_CHUNKS']}: {mrr:.4f}")
+        print(f"Average Positive Rank: {avg_positive_rank:.2f}")
+        print(f"Average Judge Score: {avg_judge_score:.4f}")
+
+        final_results = {
+            "config": CONFIG,
+            "retrieval_mode": mode_name,
+            "metrics": {
+                "recall": recall,
+                "mrr": mrr,
+                "avg_positive_rank": avg_positive_rank,
+                "avg_judge_score": avg_judge_score,
+                "positive_found_count": positive_found_count,
+                "total_evaluated": num_evaluated
+            },
+            "individual_results": evaluation_results
         }
-        evaluation_results.append(result_entry)
-        total_judge_score += judge_score
-        
-        if positive_rank is not None:
-            positive_found_count += 1
-            total_positive_rank += positive_rank
 
-    num_evaluated = len(evaluation_results)
-    recall = positive_found_count / num_evaluated if num_evaluated > 0 else 0
-    avg_judge_score = total_judge_score / num_evaluated if num_evaluated > 0 else 0
-    avg_positive_rank = total_positive_rank / positive_found_count if positive_found_count > 0 else 0
-    mrr = sum([1.0/r['positive_rank'] for r in evaluation_results if r['positive_rank'] is not None]) / num_evaluated
+        with open(CONFIG[result_file_key], 'w') as f:
+            json.dump(final_results, f, indent=2)
+        print(f"Results saved to {CONFIG[result_file_key]}")
 
-    print(f"\n--- Results ---")
-    print(f"Evaluated: {num_evaluated}")
-    print(f"Recall@{CONFIG['TOP_K_CHUNKS']}: {recall:.4f}")
-    print(f"MRR@{CONFIG['TOP_K_CHUNKS']}: {mrr:.4f}")
-    print(f"Average Positive Rank: {avg_positive_rank:.2f}")
-    print(f"Average Judge Score: {avg_judge_score:.4f}")
-    
-    final_results = {
-        "config": CONFIG,
-        "metrics": {
-            "recall": recall,
-            "mrr": mrr,
-            "avg_positive_rank": avg_positive_rank,
-            "avg_judge_score": avg_judge_score,
-            "positive_found_count": positive_found_count,
-            "total_evaluated": num_evaluated
-        },
-        "individual_results": evaluation_results
-    }
-    
-    with open(CONFIG["RESULTS_FILE"], 'w') as f:
-        json.dump(final_results, f, indent=2)
-    print(f"Results saved to {CONFIG['RESULTS_FILE']}")
+    # --- semantic (dense) retrieval ---
+    evaluate("semantic", "SEARCH_API_URL", "RESULTS_FILE")
+
+    # --- lexical (BM25) retrieval ---
+    evaluate("bm25", "SEARCH_API_URL_BM25", "RESULTS_FILE_BM25")
 
 if __name__ == "__main__":
     main()

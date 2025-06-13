@@ -425,3 +425,6 @@ yarl==1.9.4
 zipnn==0.5.0
 zipp==3.18.2
 zstandard==0.23.0
+# --- Added for BM25 / Tantivy keyword search ---
+lancedb>=0.5.0
+tantivy==0.20.1
